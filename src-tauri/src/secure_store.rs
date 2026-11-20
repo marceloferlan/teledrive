@@ -6,6 +6,10 @@
 //! permissions. There is deliberately no plaintext fallback: when the OS
 //! credential store is unavailable every call fails with `SECURE_STORE_UNAVAILABLE`.
 //!
+//! Mobile targets (Android, iOS) are the exception: there is no credential
+//! store integration yet, so they keep the original plain JSON file, which
+//! lives in the OS-isolated private app directory.
+//!
 //! Blob layout: `MAGIC (4) || nonce (12) || ciphertext+tag`. A per-file
 //! associated-data label is authenticated, so a vault blob cannot be swapped
 //! in as a session blob.
@@ -13,18 +17,26 @@
 //! Legacy plaintext JSON files are migrated on first read: encrypt, write,
 //! decrypt and compare, and only then delete the plaintext.
 
+#[cfg(any(not(mobile), test))]
 use aes_gcm::aead::{Aead, OsRng, Payload};
+#[cfg(any(not(mobile), test))]
 use aes_gcm::{AeadCore, Aes256Gcm, Key, KeyInit, Nonce};
 use serde_json::Value;
 use std::path::Path;
+#[cfg(not(mobile))]
 use std::sync::{Mutex, OnceLock};
 
+#[cfg(not(mobile))]
 pub const ERR_UNAVAILABLE: &str = "SECURE_STORE_UNAVAILABLE";
 
+#[cfg(any(not(mobile), test))]
 const MAGIC: &[u8; 4] = b"TDS1";
+#[cfg(any(not(mobile), test))]
 const NONCE_LEN: usize = 12;
+#[cfg(any(not(mobile), test))]
 const KEY_LEN: usize = 32;
 
+#[cfg(not(mobile))]
 fn unavailable(detail: impl std::fmt::Display) -> String {
     format!("{ERR_UNAVAILABLE}: {detail}")
 }
@@ -33,11 +45,14 @@ fn unavailable(detail: impl std::fmt::Display) -> String {
 // Master key
 // ----------------------------------------------------------------------------
 
+#[cfg(not(mobile))]
 static MASTER_KEY: OnceLock<[u8; KEY_LEN]> = OnceLock::new();
+#[cfg(not(mobile))]
 static KEY_INIT: Mutex<()> = Mutex::new(());
 
 /// Returns the master key, creating it in the OS credential store on first use.
 /// The key is cached for the life of the process so the OS is asked once.
+#[cfg(not(mobile))]
 fn master_key() -> Result<[u8; KEY_LEN], String> {
     if let Some(key) = MASTER_KEY.get() {
         return Ok(*key);
@@ -53,7 +68,10 @@ fn master_key() -> Result<[u8; KEY_LEN], String> {
     Ok(key)
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+#[cfg(all(
+    not(mobile),
+    any(target_os = "macos", target_os = "windows", target_os = "linux")
+))]
 fn load_or_create_os_key() -> Result<[u8; KEY_LEN], String> {
     let entry = keyring::Entry::new("com.teledrive.app", "vault-master-key")
         .map_err(unavailable)?;
@@ -71,7 +89,10 @@ fn load_or_create_os_key() -> Result<[u8; KEY_LEN], String> {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+#[cfg(all(
+    not(mobile),
+    not(any(target_os = "macos", target_os = "windows", target_os = "linux"))
+))]
 fn load_or_create_os_key() -> Result<[u8; KEY_LEN], String> {
     Err(unavailable("no OS credential store support on this platform"))
 }
@@ -80,6 +101,7 @@ fn load_or_create_os_key() -> Result<[u8; KEY_LEN], String> {
 // Sealing
 // ----------------------------------------------------------------------------
 
+#[cfg(any(not(mobile), test))]
 fn encrypt(key: &[u8; KEY_LEN], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, String> {
     let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
     let nonce = Aes256Gcm::generate_nonce(&mut OsRng);
@@ -93,6 +115,7 @@ fn encrypt(key: &[u8; KEY_LEN], aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>,
     Ok(out)
 }
 
+#[cfg(any(not(mobile), test))]
 fn decrypt(key: &[u8; KEY_LEN], aad: &[u8], blob: &[u8]) -> Result<Vec<u8>, String> {
     if blob.len() < MAGIC.len() + NONCE_LEN || &blob[..MAGIC.len()] != MAGIC {
         return Err("Secure store file is corrupt or has an unknown format".to_string());
@@ -110,6 +133,7 @@ fn decrypt(key: &[u8; KEY_LEN], aad: &[u8], blob: &[u8]) -> Result<Vec<u8>, Stri
 // Files
 // ----------------------------------------------------------------------------
 
+#[cfg(any(not(mobile), test))]
 fn load_with_key(
     key: &[u8; KEY_LEN],
     enc_path: &Path,
@@ -149,6 +173,7 @@ fn load_with_key(
     Ok(Some(value))
 }
 
+#[cfg(any(not(mobile), test))]
 fn store_with_key(
     key: &[u8; KEY_LEN],
     enc_path: &Path,
@@ -162,6 +187,7 @@ fn store_with_key(
 /// Loads a sealed JSON document, migrating `legacy_path` when needed.
 /// Returns `Ok(None)` when neither file exists, without touching the OS
 /// credential store.
+#[cfg(not(mobile))]
 pub fn load(enc_path: &Path, legacy_path: &Path, aad: &[u8]) -> Result<Option<Value>, String> {
     if !enc_path.exists() && !legacy_path.exists() {
         return Ok(None);
@@ -170,8 +196,38 @@ pub fn load(enc_path: &Path, legacy_path: &Path, aad: &[u8]) -> Result<Option<Va
 }
 
 /// Seals and atomically writes a JSON document.
-pub fn store(enc_path: &Path, value: &Value, aad: &[u8]) -> Result<(), String> {
+#[cfg(not(mobile))]
+pub fn store(
+    enc_path: &Path,
+    _legacy_path: &Path,
+    value: &Value,
+    aad: &[u8],
+) -> Result<(), String> {
     store_with_key(&master_key()?, enc_path, value, aad)
+}
+
+/// Mobile: plain JSON in the private app directory (no credential store yet).
+#[cfg(mobile)]
+pub fn load(_enc_path: &Path, legacy_path: &Path, _aad: &[u8]) -> Result<Option<Value>, String> {
+    if !legacy_path.exists() {
+        return Ok(None);
+    }
+    let contents = std::fs::read_to_string(legacy_path)
+        .map_err(|e| format!("Failed to read {}: {e}", legacy_path.display()))?;
+    serde_json::from_str(&contents)
+        .map(Some)
+        .map_err(|e| format!("File {} is corrupt: {e}", legacy_path.display()))
+}
+
+#[cfg(mobile)]
+pub fn store(
+    _enc_path: &Path,
+    legacy_path: &Path,
+    value: &Value,
+    _aad: &[u8],
+) -> Result<(), String> {
+    let bytes = serde_json::to_vec(value).map_err(|e| format!("Failed to encode JSON: {e}"))?;
+    crate::atomic_write(legacy_path, &bytes)
 }
 
 #[cfg(test)]

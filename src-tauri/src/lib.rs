@@ -59,10 +59,10 @@ async fn get_vault_state(app: tauri::AppHandle, lines: Option<usize>) -> Result<
 /// Saves the Telegram session string, encrypted at rest (see `secure_store`).
 #[tauri::command]
 async fn save_session(app: tauri::AppHandle, session: String, phone: String) -> Result<(), String> {
-    let (enc_path, _) = session_paths(&app)?;
+    let (enc_path, legacy_path) = session_paths(&app)?;
     let json = serde_json::json!({ "session": session, "phone": phone });
     tauri::async_runtime::spawn_blocking(move || {
-        secure_store::store(&enc_path, &json, SESSION_AAD)
+        secure_store::store(&enc_path, &legacy_path, &json, SESSION_AAD)
     })
     .await
     .map_err(|e| format!("save_session task join error: {e}"))?
@@ -111,7 +111,7 @@ async fn clear_session_only(app: tauri::AppHandle) -> Result<(), String> {
         if let Some(obj) = parsed.as_object_mut() {
             obj.insert("session".to_string(), serde_json::Value::Null);
         }
-        secure_store::store(&enc_path, &parsed, SESSION_AAD)
+        secure_store::store(&enc_path, &legacy_path, &parsed, SESSION_AAD)
     })
     .await
     .map_err(|e| format!("clear_session_only task join error: {e}"))?
@@ -222,8 +222,13 @@ fn read_vault(app: &tauri::AppHandle) -> Result<VaultMap, String> {
 }
 
 fn write_vault(app: &tauri::AppHandle, data: VaultMap) -> Result<(), String> {
-    let (enc_path, _) = vault_paths(app)?;
-    secure_store::store(&enc_path, &serde_json::Value::Object(data), VAULT_AAD)
+    let (enc_path, legacy_path) = vault_paths(app)?;
+    secure_store::store(
+        &enc_path,
+        &legacy_path,
+        &serde_json::Value::Object(data),
+        VAULT_AAD,
+    )
 }
 
 /// Saves a key-value pair to the encrypted vault in the app data directory.
