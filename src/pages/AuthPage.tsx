@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback } from "react";
 import { logger } from "@/lib/logger";
+import { isSecureStoreUnavailable, reportSecureStoreUnavailable } from "@/lib/secure/secureStoreError";
 import { useNavigate, Link } from "react-router-dom";
 import { Trans, useTranslation } from "react-i18next";
 import {
@@ -649,6 +650,7 @@ export default function AuthPage() {
         await invoke("save_session", { session: sessionString, phone: authPhone });
       } catch (saveErr) {
         logger.error("save_session (Rust) failed:", saveErr);
+        if (isSecureStoreUnavailable(saveErr)) reportSecureStoreUnavailable();
       }
 
       try {

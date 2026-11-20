@@ -1,5 +1,6 @@
 import { lazy, Suspense, useState, useEffect } from "react";
 import { logger } from "@/lib/logger";
+import { isSecureStoreUnavailable, reportSecureStoreUnavailable } from "@/lib/secure/secureStoreError";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
 import { useAuthStore } from "./stores/authStore";
 import { useFileStore } from "./stores/fileStore";
@@ -185,6 +186,7 @@ function App() {
         }
       } catch (err: any) {
         logger.error("Failed to restore session on app launch:", err);
+        if (isSecureStoreUnavailable(err)) reportSecureStoreUnavailable();
         await logVaultState(
           `BOOTSTRAP_ERR: ${err?.message || JSON.stringify(err)}\nStack: ${err?.stack || "no_stack"}`
         );

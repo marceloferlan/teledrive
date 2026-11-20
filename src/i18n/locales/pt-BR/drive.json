@@ -6,6 +6,9 @@
   "splash": {
     "connecting": "Conectando ao Telegram..."
   },
+  "secureStore": {
+    "unavailable": "O armazenamento seguro não está disponível. O TeleDrive não conseguiu acessar o chaveiro do sistema, então seu login e suas chaves não estão sendo salvos. Permita o acesso ao chaveiro e reinicie o app."
+  },
   "nav": {
     "myDrive": "Meu Drive",
     "recent": "Recentes",

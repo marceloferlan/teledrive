@@ -6,6 +6,9 @@
   "splash": {
     "connecting": "Connecting to Telegram..."
   },
+  "secureStore": {
+    "unavailable": "Secure storage is unavailable. TeleDrive could not reach the system keychain, so your login and keys are not being saved. Allow keychain access and restart the app."
+  },
   "nav": {
     "myDrive": "My Drive",
     "recent": "Recent",
