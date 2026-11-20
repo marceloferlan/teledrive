@@ -1,3 +1,5 @@
+mod secure_store;
+
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -54,16 +56,13 @@ async fn get_vault_state(app: tauri::AppHandle, lines: Option<usize>) -> Result<
     .map_err(|e| format!("get_vault_state task join error: {e}"))?
 }
 
-/// Saves the Telegram session string to a simple JSON file in the app data directory.
-/// This is reliable, fast, and survives dev-server restarts without Stronghold overhead.
+/// Saves the Telegram session string, encrypted at rest (see `secure_store`).
 #[tauri::command]
 async fn save_session(app: tauri::AppHandle, session: String, phone: String) -> Result<(), String> {
-    let session_path = get_session_path(&app)?;
+    let (enc_path, _) = session_paths(&app)?;
     let json = serde_json::json!({ "session": session, "phone": phone });
-    let payload = json.to_string().into_bytes();
     tauri::async_runtime::spawn_blocking(move || {
-        atomic_write(&session_path, &payload)
-            .map_err(|e| format!("Failed to write session file: {e}"))
+        secure_store::store(&enc_path, &json, SESSION_AAD)
     })
     .await
     .map_err(|e| format!("save_session task join error: {e}"))?
@@ -73,16 +72,10 @@ async fn save_session(app: tauri::AppHandle, session: String, phone: String) -> 
 /// Returns null fields if no session file exists.
 #[tauri::command]
 async fn load_session(app: tauri::AppHandle) -> Result<serde_json::Value, String> {
-    let session_path = get_session_path(&app)?;
+    let (enc_path, legacy_path) = session_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        if !session_path.exists() {
-            return Ok(serde_json::json!({ "session": null, "phone": null }));
-        }
-        let contents = std::fs::read_to_string(&session_path)
-            .map_err(|e| format!("Failed to read session file: {e}"))?;
-        let parsed: serde_json::Value = serde_json::from_str(&contents)
-            .map_err(|e| format!("Failed to parse session file: {e}"))?;
-        Ok(parsed)
+        Ok(secure_store::load(&enc_path, &legacy_path, SESSION_AAD)?
+            .unwrap_or_else(|| serde_json::json!({ "session": null, "phone": null })))
     })
     .await
     .map_err(|e| format!("load_session task join error: {e}"))?
@@ -91,11 +84,13 @@ async fn load_session(app: tauri::AppHandle) -> Result<serde_json::Value, String
 /// Clears the saved session file (used on logout).
 #[tauri::command]
 async fn clear_session(app: tauri::AppHandle) -> Result<(), String> {
-    let session_path = get_session_path(&app)?;
+    let (enc_path, legacy_path) = session_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        if session_path.exists() {
-            std::fs::remove_file(&session_path)
-                .map_err(|e| format!("Failed to delete session file: {e}"))?;
+        for path in [&enc_path, &legacy_path] {
+            if path.exists() {
+                std::fs::remove_file(path)
+                    .map_err(|e| format!("Failed to delete session file: {e}"))?;
+            }
         }
         Ok(())
     })
@@ -107,21 +102,16 @@ async fn clear_session(app: tauri::AppHandle) -> Result<(), String> {
 /// Used during logout so the phone-keyed channel ID can still be found on next login.
 #[tauri::command]
 async fn clear_session_only(app: tauri::AppHandle) -> Result<(), String> {
-    let session_path = get_session_path(&app)?;
+    let (enc_path, legacy_path) = session_paths(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        if !session_path.exists() {
+        let Some(mut parsed) = secure_store::load(&enc_path, &legacy_path, SESSION_AAD)? else {
             return Ok(());
-        }
-        let contents = std::fs::read_to_string(&session_path)
-            .map_err(|e| format!("Failed to read session file: {e}"))?;
-        let mut parsed: serde_json::Value = serde_json::from_str(&contents)
-            .map_err(|e| format!("Failed to parse session file: {e}"))?;
+        };
         // Null out the session token but keep the phone number
         if let Some(obj) = parsed.as_object_mut() {
             obj.insert("session".to_string(), serde_json::Value::Null);
         }
-        atomic_write(&session_path, parsed.to_string().as_bytes())
-            .map_err(|e| format!("Failed to write session file: {e}"))
+        secure_store::store(&enc_path, &parsed, SESSION_AAD)
     })
     .await
     .map_err(|e| format!("clear_session_only task join error: {e}"))?
@@ -217,64 +207,53 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), String> {
     atomic_write_with_perms(path, bytes, true)
 }
 
-/// Saves a key-value pair to a vault file in the app data directory.
+type VaultMap = serde_json::Map<String, serde_json::Value>;
+
+/// Reads the whole vault (empty when none exists). A corrupt or undecryptable
+/// vault is an error, never an empty map: callers write the map back, and an
+/// empty one would destroy every other stored credential.
+fn read_vault(app: &tauri::AppHandle) -> Result<VaultMap, String> {
+    let (enc_path, legacy_path) = vault_paths(app)?;
+    match secure_store::load(&enc_path, &legacy_path, VAULT_AAD)? {
+        None => Ok(VaultMap::new()),
+        Some(serde_json::Value::Object(map)) => Ok(map),
+        Some(_) => Err("Vault file is corrupt (refusing to overwrite): not an object".to_string()),
+    }
+}
+
+fn write_vault(app: &tauri::AppHandle, data: VaultMap) -> Result<(), String> {
+    let (enc_path, _) = vault_paths(app)?;
+    secure_store::store(&enc_path, &serde_json::Value::Object(data), VAULT_AAD)
+}
+
+/// Saves a key-value pair to the encrypted vault in the app data directory.
 #[tauri::command]
 fn save_vault_value(app: tauri::AppHandle, key: String, value: String) -> Result<(), String> {
     let _guard = lock_vault()?;
-    let vault_path = get_vault_path(&app)?;
-    let mut data = if vault_path.exists() {
-        let contents = std::fs::read_to_string(&vault_path)
-            .map_err(|e| format!("Failed to read vault file: {e}"))?;
-        // Never silently replace a corrupt vault with an empty map: that would
-        // destroy every other stored credential on the next save.
-        serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&contents)
-            .map_err(|e| format!("Vault file is corrupt (refusing to overwrite): {e}"))?
-    } else {
-        serde_json::Map::new()
-    };
-
+    let mut data = read_vault(&app)?;
     data.insert(key, serde_json::Value::String(value));
-    let bytes = serde_json::to_vec(&data).map_err(|e| format!("Failed to encode vault: {e}"))?;
-    atomic_write(&vault_path, &bytes)
+    write_vault(&app, data)
 }
 
 /// Loads a value for a key from the vault file.
 #[tauri::command]
 fn load_vault_value(app: tauri::AppHandle, key: String) -> Result<Option<String>, String> {
     let _guard = lock_vault()?;
-    let vault_path = get_vault_path(&app)?;
-    if !vault_path.exists() {
-        return Ok(None);
-    }
-    let contents = std::fs::read_to_string(&vault_path)
-        .map_err(|e| format!("Failed to read vault file: {e}"))?;
-    let data: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse vault file: {e}"))?;
-    
-    if let Some(val) = data.get(&key) {
-        if let Some(s) = val.as_str() {
-            return Ok(Some(s.to_string()));
-        }
-    }
-    Ok(None)
+    Ok(read_vault(&app)?
+        .get(&key)
+        .and_then(|val| val.as_str())
+        .map(str::to_string))
 }
 
 /// Deletes a key-value pair from the vault file.
 #[tauri::command]
 fn delete_vault_value(app: tauri::AppHandle, key: String) -> Result<(), String> {
     let _guard = lock_vault()?;
-    let vault_path = get_vault_path(&app)?;
-    if !vault_path.exists() {
+    let mut data = read_vault(&app)?;
+    if data.remove(&key).is_none() {
         return Ok(());
     }
-    let contents = std::fs::read_to_string(&vault_path)
-        .map_err(|e| format!("Failed to read vault file: {e}"))?;
-    let mut data: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse vault file: {e}"))?;
-
-    data.remove(&key);
-    let bytes = serde_json::to_vec(&data).map_err(|e| format!("Failed to encode vault: {e}"))?;
-    atomic_write(&vault_path, &bytes)
+    write_vault(&app, data)
 }
 
 /// Quarantines a vault value: reads the value at `key` and copies it under
@@ -292,20 +271,12 @@ fn quarantine_vault_value(
     backup_key: String,
 ) -> Result<(), String> {
     let _guard = lock_vault()?;
-    let vault_path = get_vault_path(&app)?;
-    if !vault_path.exists() {
+    let mut data = read_vault(&app)?;
+    let Some(value) = data.remove(&key) else {
         return Ok(());
-    }
-    let contents = std::fs::read_to_string(&vault_path)
-        .map_err(|e| format!("Failed to read vault file: {e}"))?;
-    let mut data: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&contents)
-        .map_err(|e| format!("Failed to parse vault file: {e}"))?;
-
-    if let Some(value) = data.remove(&key) {
-        data.insert(backup_key, value);
-    }
-    let bytes = serde_json::to_vec(&data).map_err(|e| format!("Failed to encode vault: {e}"))?;
-    atomic_write(&vault_path, &bytes)
+    };
+    data.insert(backup_key, value);
+    write_vault(&app, data)
 }
 
 // ============================================================================
@@ -507,24 +478,34 @@ fn quarantine_backup_manifest(
     Ok(Some(base))
 }
 
-fn get_vault_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+/// Associated-data labels binding each encrypted file to its purpose.
+const VAULT_AAD: &[u8] = b"teledrive:vault:v1";
+const SESSION_AAD: &[u8] = b"teledrive:session:v1";
+
+/// `(encrypted, legacy plaintext)` paths for a credential file. The legacy
+/// path exists only so `secure_store` can migrate and then delete it.
+fn credential_paths(
+    app: &tauri::AppHandle,
+    stem: &str,
+) -> Result<(PathBuf, PathBuf), String> {
     let data_dir = app
         .path()
         .app_data_dir()
         .map_err(|e| format!("Failed to get app data dir: {e}"))?;
     std::fs::create_dir_all(&data_dir)
         .map_err(|e| format!("Failed to create app data dir: {e}"))?;
-    Ok(data_dir.join("teledrive_vault.json"))
+    Ok((
+        data_dir.join(format!("{stem}.enc")),
+        data_dir.join(format!("{stem}.json")),
+    ))
 }
 
-fn get_session_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let data_dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| format!("Failed to get app data dir: {e}"))?;
-    std::fs::create_dir_all(&data_dir)
-        .map_err(|e| format!("Failed to create app data dir: {e}"))?;
-    Ok(data_dir.join("teledrive_session.json"))
+fn vault_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    credential_paths(app, "teledrive_vault")
+}
+
+fn session_paths(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), String> {
+    credential_paths(app, "teledrive_session")
 }
 
 // ============================================================================
@@ -1484,19 +1465,6 @@ pub fn run() {
     // The cfg(mobile) / cfg(not(mobile)) guards below ensure the correct
     // plugin set is registered at compile time for each target platform.
     let builder = tauri::Builder::default()
-        .plugin(
-            tauri_plugin_stronghold::Builder::new(|password| {
-                // Fixed salt for local vault key derivation
-                let salt = b"teledrive-vault-salt-value";
-                let params = argon2::Params::new(1024, 2, 1, Some(32)).unwrap();
-                let argon2 = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
-                let mut output_key = [0u8; 32];
-                argon2.hash_password_into(password.as_bytes(), salt, &mut output_key)
-                    .expect("stronghold password hashing failed");
-                output_key.to_vec()
-            })
-            .build(),
-        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_opener::init());

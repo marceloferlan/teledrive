@@ -9,7 +9,7 @@
  * as plaintext anywhere on disk.
  *
  * Override them with VITE_TELEGRAM_API_ID / VITE_TELEGRAM_API_HASH at build
- * time, or by storing credentials in the Stronghold vault, which takes
+ * time, or by storing credentials in the encrypted vault, which takes
  * priority over these defaults.
  */
 

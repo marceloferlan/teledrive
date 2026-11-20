@@ -655,7 +655,7 @@ export default function AuthPage() {
         await saveSecret(VAULT_KEY_SESSION, sessionString);
         await saveSecret(VAULT_KEY_PHONE, authPhone);
       } catch (vaultErr) {
-        logger.warn("Stronghold saveSecret failed (non-fatal):", vaultErr);
+        logger.warn("vault saveSecret failed (non-fatal):", vaultErr);
       }
 
       applyPending(null);

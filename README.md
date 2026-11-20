@@ -89,7 +89,7 @@ Telegram offers virtually unlimited cloud storage in private channels, but lacks
 
 - **Zero Relay Backend**: All file operations and MTProto connections happen directly from your local machine to Telegram data centers.
 - **Virtual Drive**: Nested directories, instant search, starred files, archive, and trash are indexed in a gzipped Schema v3 catalog pinned inside your channel and cached locally in IndexedDB.
-- **Client-Side Privacy & Vault**: Local credentials reside in an atomic Rust key-value vault / Tauri Stronghold snapshot, with optional zero-knowledge `TDE1` AES-256-GCM encryption for uploaded files.
+- **Client-Side Privacy & Vault**: Local credentials reside in an atomic Rust key-value vault encrypted with AES-256-GCM, whose master key lives in the OS credential store (macOS Keychain, Windows Credential Manager, Linux Secret Service), with optional zero-knowledge `TDE1` AES-256-GCM encryption for uploaded files.
 - **Multi-Account**: Switch between multiple phone numbers with complete session and local vault isolation.
 
 ---
@@ -164,7 +164,7 @@ shasum -a 256 <filename>
 ┌──────────────▼──────────┐              ┌─────────▼──────────────┐
 │     Tauri Rust Core     │              │   Telegram Cloud API   │
 │  ┌───────────────────┐  │              │  (Private Channel)     │
-│  │ Stronghold Vault  │  │              └────────────────────────┘
+│  │ Encrypted Vault   │  │              └────────────────────────┘
 │  └───────────────────┘  │
 └─────────────────────────┘
 ```

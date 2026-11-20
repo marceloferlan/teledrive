@@ -58,7 +58,7 @@ flowchart TD
   Core -->|"Direct MTProto (TLS 443)"| TG["Telegram Datacenters\n(Private Storage Channel)"]
 
   subgraph Rust["Tauri v2 Native Layer"]
-    Vault["Atomic JSON Vault & Session\n(vault.json, session.json)"]
+    Vault["Encrypted Vault & Session\n(vault.enc, session.enc)"]
     FS["Unscoped Chunked I/O & Walker\n(read_file_chunk, write_file_chunk, hash_file)"]
     Cache["Preview Cache & protocol-asset\n($APPLOCALDATA/preview_cache)"]
     OS["System Opener & Tray Scheduler"]
@@ -91,7 +91,7 @@ Non-Tauri browser previews (`vite dev`) are safely abstracted behind [src/lib/ru
 ### 4.1 Auth, Vault & Multi-Account Isolation
 
 - **Session Persistence:** Authenticated MTProto session strings and phone metadata are persisted atomically via Rust `save_session` / `load_session` ([src-tauri/src/lib.rs#L60-L82](../src-tauri/src/lib.rs#L60-L82)) and restored via [`restoreSession`](../src/lib/telegram/restoreSession.ts).
-- **Serialized Key-Value Vault:** [`src/lib/secure/vault.ts`](../src/lib/secure/vault.ts#L36-L85) serializes read/write operations through an in-memory Promise queue against Rust `save_vault_value` / `load_vault_value`, isolating storage channels per account via `channelIdKey(phone)` (`telegram_channel_id_<phone>`). [`src/lib/secure/stronghold.ts`](../src/lib/secure/stronghold.ts#L38-L57) wraps `tauri-plugin-stronghold` for encrypted snapshot storage (`stronghold.bin`) where initialized.
+- **Serialized Key-Value Vault:** [`src/lib/secure/vault.ts`](../src/lib/secure/vault.ts#L36-L85) serializes read/write operations through an in-memory Promise queue against Rust `save_vault_value` / `load_vault_value`, isolating storage channels per account via `channelIdKey(phone)` (`telegram_channel_id_<phone>`). Rust seals the vault and session files with AES-256-GCM (`teledrive_vault.enc`, `teledrive_session.enc`) in [`src-tauri/src/secure_store.rs`](../src-tauri/src/secure_store.rs); the 256-bit master key lives in the OS credential store, and when it is unavailable every vault call fails with `SECURE_STORE_UNAVAILABLE` instead of falling back to plaintext. Legacy plaintext JSON files are migrated and deleted on first read.
 - **Multi-Folder Channel Discovery:** [`searchStorageChannelInDialogs`](../src/lib/telegram/channelManager.ts#L37-L61) searches both the active dialog list (`folder: 0`) and archived dialogs (`folder: 1`) for `"TeleDrive Storage"` before creating a new private channel, preventing split libraries across devices.
 
 ### 4.2 Virtual Catalog, Schema v3 & IndexQueue

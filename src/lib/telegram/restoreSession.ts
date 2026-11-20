@@ -14,10 +14,10 @@ import { logVaultState } from "../runtime/bridge";
  * Attempts to restore a previously saved Telegram session.
  *
  * Session token is stored via a dedicated Rust command (save_session) which
- * writes a simple JSON file in the app data dir. This is reliable and survives
- * dev-server restarts without any Stronghold overhead.
+ * writes an encrypted file in the app data dir (see src-tauri/src/secure_store.rs).
+ * It survives dev-server restarts.
  *
- * Credentials (API ID / API Hash) are still read from the Stronghold vault so
+ * Credentials (API ID / API Hash) are still read from the encrypted vault so
  * users who configure custom credentials retain that preference.
  */
 export async function restoreSession(): Promise<boolean> {
