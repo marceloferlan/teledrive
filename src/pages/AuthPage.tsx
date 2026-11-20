@@ -1766,6 +1766,11 @@ export default function AuthPage() {
                 </div>
               )}
 
+              <p className="flex items-start gap-1.5 text-[11px] text-muted-foreground leading-relaxed">
+                <Info className="h-3.5 w-3.5 mt-px shrink-0" />
+                <span>{t("phone.storageNotice")}</span>
+              </p>
+
               {!pending && configApiId && configApiHash && (
                 <ApiCredentialsSection
                   credentials={{
