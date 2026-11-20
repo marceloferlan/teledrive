@@ -29,14 +29,13 @@ import { useAuthStore } from "@/stores/authStore";
 import { initClient, getClient, disconnectClient } from "@/lib/telegram/client";
 import {
   saveSecret,
-  getSecret,
   VAULT_KEY_SESSION,
   VAULT_KEY_PHONE,
-  VAULT_KEY_API_ID,
-  VAULT_KEY_API_HASH,
 } from "@/lib/secure/vault";
 import { bootstrapTeleDrive } from "@/lib/telegram/bootstrap";
-import { APP_VERSION, DEFAULT_API_ID, DEFAULT_API_HASH } from "@/lib/telegram/config";
+import { APP_VERSION } from "@/lib/telegram/config";
+import { loadApiCredentials } from "@/lib/telegram/apiCredentials";
+import ApiCredentialsSection from "@/components/auth/ApiCredentialsSection";
 import { safeComputeCheck, toBuffer } from "@/lib/telegram/srp-helper";
 import { startQrLogin } from "@/lib/telegram/qr-helper";
 import { saveFutureAuthToken, loadLogoutTokens } from "@/lib/telegram/futureAuth";
@@ -460,6 +459,7 @@ export default function AuthPage() {
 
   const [configApiId, setConfigApiId] = useState<number | null>(null);
   const [configApiHash, setConfigApiHash] = useState<string | null>(null);
+  const [apiIsCustom, setApiIsCustom] = useState(false);
   const [checkingConfig, setCheckingConfig] = useState(true);
 
   const [step, setStep] = useState<Step>("phone");
@@ -519,18 +519,10 @@ export default function AuthPage() {
   useEffect(() => {
     async function loadConfig() {
       try {
-        const id = await getSecret(VAULT_KEY_API_ID);
-        const hash = await getSecret(VAULT_KEY_API_HASH);
-        const parsedId = id ? parseInt(id, 10) : NaN;
-        setConfigApiId(
-          Number.isFinite(parsedId) && parsedId > 0
-            ? parsedId
-            : DEFAULT_API_ID
-        );
-        setConfigApiHash(hash || DEFAULT_API_HASH);
-      } catch {
-        setConfigApiId(DEFAULT_API_ID);
-        setConfigApiHash(DEFAULT_API_HASH);
+        const credentials = await loadApiCredentials();
+        setConfigApiId(credentials.apiId);
+        setConfigApiHash(credentials.apiHash);
+        setApiIsCustom(credentials.isCustom);
       } finally {
         setCheckingConfig(false);
       }
@@ -1772,6 +1764,21 @@ export default function AuthPage() {
                     </div>
                   )}
                 </div>
+              )}
+
+              {!pending && configApiId && configApiHash && (
+                <ApiCredentialsSection
+                  credentials={{
+                    apiId: configApiId,
+                    apiHash: configApiHash,
+                    isCustom: apiIsCustom,
+                  }}
+                  onChange={(next) => {
+                    setConfigApiId(next.apiId);
+                    setConfigApiHash(next.apiHash);
+                    setApiIsCustom(next.isCustom);
+                  }}
+                />
               )}
             </div>
           )}

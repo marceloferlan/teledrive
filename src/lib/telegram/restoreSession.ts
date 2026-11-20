@@ -1,13 +1,8 @@
 import { initClient, getClient } from "./client";
 import { logger } from "@/lib/logger";
 import { useAuthStore } from "../../stores/authStore";
-import {
-  getSecret,
-  VAULT_KEY_API_ID,
-  VAULT_KEY_API_HASH,
-} from "../secure/vault";
 import { invoke } from "@tauri-apps/api/core";
-import { DEFAULT_API_ID, DEFAULT_API_HASH } from "./config";
+import { loadApiCredentials } from "./apiCredentials";
 import { logVaultState } from "../runtime/bridge";
 
 /**
@@ -51,19 +46,7 @@ export async function restoreSession(): Promise<boolean> {
     }
 
     // ── 2. Resolve API credentials (vault or built-in defaults) ───────────────
-    let apiId   = DEFAULT_API_ID;
-    let apiHash = DEFAULT_API_HASH;
-    try {
-      const storedApiIdStr  = await getSecret(VAULT_KEY_API_ID);
-      const storedApiHash   = await getSecret(VAULT_KEY_API_HASH);
-      if (storedApiIdStr) {
-        const parsed = parseInt(storedApiIdStr, 10);
-        if (!isNaN(parsed)) apiId = parsed;
-      }
-      if (storedApiHash) apiHash = storedApiHash;
-    } catch {
-      // Vault unavailable — built-in defaults already set above
-    }
+    const { apiId, apiHash } = await loadApiCredentials();
 
     // Set credentials in Zustand store
     useAuthStore.getState().setCredentials(apiId, apiHash);
