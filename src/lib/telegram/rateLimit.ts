@@ -24,6 +24,14 @@ import { logger } from "@/lib/logger";
 export const FLOOD_WAIT_CAP_SECONDS = 300;
 
 /**
+ * Total time a single `withTelegramRetry` call may spend waiting on
+ * FLOOD_WAITs. A flood wait does not use up a retry attempt, so this budget
+ * is what bounds the call: once Telegram asks for more than what is left, the
+ * call fails with the requested seconds in the message instead of waiting.
+ */
+export const FLOOD_WAIT_TOTAL_BUDGET_SECONDS = 15 * 60;
+
+/**
  * Returns the FLOOD_WAIT delay (in seconds) Telegram is asking for, or null
  * if this error is not a FLOOD_WAIT.
  */
@@ -163,16 +171,21 @@ export type TelegramRetryEvent = {
 /**
  * Run `fn` with Telegram-aware retry semantics.
  *
- * - Transient errors (FLOOD_WAIT, timeout, network) → wait the right amount, retry.
+ * - FLOOD_WAIT → wait the full time Telegram asked for, then retry. It does
+ *   not count against `maxAttempts`; the call is bounded instead by
+ *   FLOOD_WAIT_TOTAL_BUDGET_SECONDS of cumulative waiting. A request that
+ *   exceeds the remaining budget fails at once, since waiting less than asked
+ *   would only fail again.
+ * - Other transient errors (timeout, network) → exponential backoff, retry,
+ *   up to `maxAttempts` total attempts.
  * - Hard errors → throw immediately.
  *
  * @param fn           The async operation to run.
  * @param label        Used in thrown error messages so we know which call failed.
- * @param maxAttempts  Cap on total attempts. Defaults to 5.
- * @param onRetry      Optional callback fired once per transient error
- *                     that will be retried. The BackupProgressOverlay
- *                     uses this to show "Retrying 3/5 (FLOOD_WAIT 30s)"
- *                     instead of a frozen progress bar.
+ * @param maxAttempts  Cap on attempts failing for non-flood reasons. Defaults to 5.
+ * @param onRetry      Optional callback fired once per error that will be
+ *                     retried. The BackupProgressOverlay uses this to show
+ *                     "Retrying 3/5 (FLOOD_WAIT 30s)" instead of a frozen bar.
  */
 export async function withTelegramRetry<T>(
   fn: () => Promise<T>,
@@ -180,22 +193,35 @@ export async function withTelegramRetry<T>(
   maxAttempts: number = 5,
   onRetry?: (event: TelegramRetryEvent) => void
 ): Promise<T> {
-  let lastErr: any = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  let attempt = 1;
+  let floodBudgetMs = FLOOD_WAIT_TOTAL_BUDGET_SECONDS * 1000;
+  for (;;) {
     try {
       return await fn();
     } catch (err: any) {
-      lastErr = err;
       if (isHardError(err)) {
         // Bubble up hard errors immediately; no point retrying.
         throw err;
       }
-      if (attempt >= maxAttempts) {
-        throw new Error(
-          `[${label}] Failed after ${maxAttempts} attempts: ${err?.message ?? err}`
-        );
+      const floodSeconds = parseFloodWaitSeconds(err);
+      let delay: number;
+      if (floodSeconds != null) {
+        delay = floodSeconds * 1000 + Math.floor(Math.random() * 250);
+        if (delay > floodBudgetMs) {
+          throw new Error(
+            `[${label}] Telegram asked to wait ${floodSeconds}s (FLOOD_WAIT), ` +
+              `more than the ${Math.floor(floodBudgetMs / 1000)}s left in the limit: ${err?.message ?? err}`
+          );
+        }
+        floodBudgetMs -= delay;
+      } else {
+        if (attempt >= maxAttempts) {
+          throw new Error(
+            `[${label}] Failed after ${maxAttempts} attempts: ${err?.message ?? err}`
+          );
+        }
+        delay = computeRetryDelay(attempt, err);
       }
-      const delay = computeRetryDelay(attempt, err);
       // eslint-disable-next-line no-console
       logger.warn(
         `[${label}] transient error (attempt ${attempt}/${maxAttempts}); waiting ${Math.round(delay / 100) / 10}s →`,
@@ -205,7 +231,7 @@ export async function withTelegramRetry<T>(
         attempt,
         maxAttempts,
         waitMs: delay,
-        floodSeconds: parseFloodWaitSeconds(err),
+        floodSeconds,
         error: err,
       });
       if (/disconnect|socket|network|fetch|timeout|reset/i.test(err?.message || String(err))) {
@@ -217,8 +243,7 @@ export async function withTelegramRetry<T>(
         }
       }
       await new Promise((r) => setTimeout(r, delay));
+      if (floodSeconds == null) attempt++;
     }
   }
-  // Unreachable but keeps the TS compiler happy.
-  throw lastErr;
 }
